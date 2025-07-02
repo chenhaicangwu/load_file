@@ -7,49 +7,30 @@ import folder_paths
 import json
 import mimetypes
 from pathlib import Path
+import shutil
+import tempfile
 
-class LoadFile:
+class LoadFileWithButton:
     """
-    通用文件加载节点 - 支持图片、视频、模型文件等多种格式
+    通用文件加载节点 - 支持通过按钮选择本地文件
     兼容ComfyUI 2024年12月版本
     """
     
     @classmethod
     def INPUT_TYPES(cls):
-        # 获取输入目录中的所有文件
-        input_dir = folder_paths.get_input_directory()
-        files = []
-        
-        # 支持的文件扩展名
-        supported_extensions = {
-            # 图片格式
-            '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp',
-            # 视频格式
-            '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv',
-            # 模型文件
-            '.pt', '.pth', '.safetensors', '.ckpt', '.bin',
-            # 其他文件
-            '.txt', '.json', '.yaml', '.yml', '.xml', '.csv'
-        }
-        
-        # 递归搜索支持的文件
-        if os.path.exists(input_dir):
-            for root, dirs, filenames in os.walk(input_dir):
-                for filename in filenames:
-                    file_ext = Path(filename).suffix.lower()
-                    if file_ext in supported_extensions:
-                        # 获取相对路径
-                        rel_path = os.path.relpath(os.path.join(root, filename), input_dir)
-                        files.append(rel_path)
-        
         return {
             "required": {
-                "file": (sorted(files) if files else ["no_files_found"], {
-                    "image_upload": True,  # 启用上传功能
-                    "tooltip": "选择要加载的文件或上传新文件"
+                "choose_file_button": ("BUTTON", {
+                    "default": "选择文件",
+                    "tooltip": "点击选择本地文件"
                 }),
             },
             "optional": {
+                "file_path": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "tooltip": "选中的文件路径（自动填充）"
+                }),
                 "load_mode": (["auto", "image", "video", "model", "text", "binary"], {
                     "default": "auto",
                     "tooltip": "文件加载模式，auto为自动检测"
@@ -62,28 +43,38 @@ class LoadFile:
     FUNCTION = "load_file"
     CATEGORY = "loaders"
     
-    def load_file(self, file, load_mode="auto"):
-        # 处理空文件列表的情况
-        if file == "no_files_found":
-            raise ValueError("没有找到支持的文件，请上传文件到input目录")
-            
-        # 获取完整文件路径 - 使用更兼容的方法
-        try:
-            file_path = folder_paths.get_annotated_filepath(file)
-        except:
-            # 如果get_annotated_filepath不可用，使用备用方法
-            input_dir = folder_paths.get_input_directory()
-            file_path = os.path.join(input_dir, file)
+    def load_file(self, choose_file_button, file_path="", load_mode="auto"):
+        if not file_path or not os.path.exists(file_path):
+            # 返回默认值
+            empty_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32)
+            return (
+                {"error": "请先选择文件", "status": "no_file"},
+                json.dumps({"status": "请点击按钮选择文件"}, ensure_ascii=False),
+                empty_image,
+                empty_mask
+            )
         
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"文件不存在: {file_path}")
+        # 复制文件到ComfyUI的input目录
+        input_dir = folder_paths.get_input_directory()
+        filename = os.path.basename(file_path)
+        dest_path = os.path.join(input_dir, filename)
+        
+        # 如果文件不存在于input目录，则复制过去
+        if not os.path.exists(dest_path) or os.path.getmtime(file_path) > os.path.getmtime(dest_path):
+            try:
+                shutil.copy2(file_path, dest_path)
+                print(f"文件已复制到: {dest_path}")
+            except Exception as e:
+                print(f"复制文件失败: {e}")
+                dest_path = file_path  # 使用原始路径
         
         # 获取文件信息
-        file_info = self._get_file_info(file_path)
+        file_info = self._get_file_info(dest_path)
         
         # 根据模式加载文件
         if load_mode == "auto":
-            load_mode = self._detect_file_type(file_path)
+            load_mode = self._detect_file_type(dest_path)
         
         file_data = None
         image = None
@@ -91,28 +82,26 @@ class LoadFile:
         
         try:
             if load_mode == "image":
-                file_data, image, mask = self._load_image(file_path)
+                file_data, image, mask = self._load_image(dest_path)
             elif load_mode == "video":
-                file_data = self._load_video(file_path)
+                file_data = self._load_video(dest_path)
             elif load_mode == "model":
-                file_data = self._load_model(file_path)
+                file_data = self._load_model(dest_path)
             elif load_mode == "text":
-                file_data = self._load_text(file_path)
+                file_data = self._load_text(dest_path)
             elif load_mode == "binary":
-                file_data = self._load_binary(file_path)
+                file_data = self._load_binary(dest_path)
             else:
-                file_data = self._load_generic(file_path)
+                file_data = self._load_generic(dest_path)
                 
         except Exception as e:
             print(f"加载文件时出错: {e}")
-            file_data = {"error": str(e), "file_path": file_path}
+            file_data = {"error": str(e), "file_path": dest_path}
         
         # 确保返回值不为None
         if image is None:
-            # 创建一个空的图像张量
             image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
         if mask is None:
-            # 创建一个空的mask张量
             mask = torch.zeros((1, 64, 64), dtype=torch.float32)
             
         return (file_data, json.dumps(file_info, indent=2, ensure_ascii=False), image, mask)
@@ -185,8 +174,6 @@ class LoadFile:
     def _load_video(self, file_path):
         """加载视频文件信息"""
         try:
-            # 这里只返回视频文件的基本信息
-            # 实际的视频处理可能需要额外的库如opencv-python
             file_data = {
                 "type": "video",
                 "file_path": file_path,
@@ -202,8 +189,6 @@ class LoadFile:
             file_ext = Path(file_path).suffix.lower()
             
             if file_ext == '.safetensors':
-                # 对于safetensors文件，只返回文件信息
-                # 实际加载需要safetensors库
                 file_data = {
                     "type": "model",
                     "format": "safetensors",
@@ -211,7 +196,6 @@ class LoadFile:
                     "note": "SafeTensors模型文件，需要专门的模型加载器"
                 }
             elif file_ext in ['.pt', '.pth', '.ckpt']:
-                # 对于PyTorch模型文件
                 file_data = {
                     "type": "model",
                     "format": "pytorch",
@@ -243,7 +227,6 @@ class LoadFile:
             }
             return file_data
         except UnicodeDecodeError:
-            # 如果UTF-8解码失败，尝试其他编码
             try:
                 with open(file_path, 'r', encoding='gbk') as f:
                     content = f.read()
@@ -281,56 +264,12 @@ class LoadFile:
             "file_path": file_path,
             "note": "通用文件类型，请选择合适的加载模式"
         }
-    
-    @classmethod
-    def IS_CHANGED(cls, file, load_mode="auto"):
-        """检查文件是否发生变化"""
-        try:
-            if file == "no_files_found":
-                return "no_files"
-                
-            # 使用更兼容的文件路径获取方法
-            try:
-                file_path = folder_paths.get_annotated_filepath(file)
-            except:
-                input_dir = folder_paths.get_input_directory()
-                file_path = os.path.join(input_dir, file)
-                
-            if os.path.exists(file_path):
-                # 使用文件的修改时间和大小作为变化检测
-                stat = os.stat(file_path)
-                return f"{stat.st_mtime}_{stat.st_size}"
-            return "file_not_found"
-        except:
-            return "error"
-    
-    @classmethod
-    def VALIDATE_INPUTS(cls, file, load_mode="auto"):
-        """验证输入参数"""
-        if file == "no_files_found":
-            return "没有找到支持的文件，请上传文件到input目录"
-            
-        # 使用更兼容的验证方法
-        try:
-            if hasattr(folder_paths, 'exists_annotated_filepath'):
-                if not folder_paths.exists_annotated_filepath(file):
-                    return f"文件不存在: {file}"
-            else:
-                # 备用验证方法
-                input_dir = folder_paths.get_input_directory()
-                file_path = os.path.join(input_dir, file)
-                if not os.path.exists(file_path):
-                    return f"文件不存在: {file}"
-        except:
-            return f"无法验证文件: {file}"
-            
-        return True
 
 # 节点注册
 NODE_CLASS_MAPPINGS = {
-    "LoadFile": LoadFile
+    "LoadFileWithButton": LoadFileWithButton
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadFile": "Load File (Universal)"
+    "LoadFileWithButton": "Load File (Button)"
 }
