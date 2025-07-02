@@ -43,7 +43,10 @@ class LoadFile:
         
         return {
             "required": {
-                "file": (sorted(files), {"tooltip": "选择要加载的文件"}),
+                "file": (sorted(files), {
+                    "tooltip": "选择要加载的文件",
+                    "image_upload": True  # 添加这行来启用文件上传按钮
+                }),
             },
             "optional": {
                 "load_mode": (["auto", "image", "video", "model", "text", "binary"], {
