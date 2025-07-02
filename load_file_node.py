@@ -38,19 +38,19 @@ class LoadFileWithButton:
             }
         }
     
-    RETURN_TYPES = ("*", "STRING", "IMAGE", "MASK")
+    RETURN_TYPES = ("FILE", "STRING", "IMAGE", "MASK")
     RETURN_NAMES = ("file_data", "file_info", "image", "mask")
     FUNCTION = "load_file"
     CATEGORY = "loaders"
     OUTPUT_NODE = False
     
     def load_file(self, file, load_mode="auto"):
-        # 检查是否为默认提示文本
+        # 修改返回值，确保第一个输出是文件路径字符串（FILE类型）
         if file == "请先上传文件":
             empty_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
             empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32)
             return (
-                {"error": "请先上传文件", "status": "no_file"},
+                "",  # FILE类型应该返回文件路径字符串
                 json.dumps({"status": "请使用上传按钮选择文件"}, ensure_ascii=False),
                 empty_image,
                 empty_mask
@@ -64,7 +64,7 @@ class LoadFileWithButton:
             empty_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
             empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32)
             return (
-                {"error": "文件不存在", "status": "file_not_found"},
+                "",  # FILE类型应该返回空字符串表示无文件
                 json.dumps({"status": "文件不存在，请重新上传"}, ensure_ascii=False),
                 empty_image,
                 empty_mask
@@ -105,7 +105,8 @@ class LoadFileWithButton:
         if mask is None:
             mask = torch.zeros((1, 64, 64), dtype=torch.float32)
             
-        return (file_data, json.dumps(file_info, indent=2, ensure_ascii=False), image, mask)
+        # 返回文件路径作为FILE类型，而不是file_data字典
+        return (file_path, json.dumps(file_info, indent=2, ensure_ascii=False), image, mask)
     
     def _get_file_info(self, file_path):
         """获取文件基本信息"""
