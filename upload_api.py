@@ -126,8 +126,3 @@ class FileUploadAPI:
             
         except Exception as e:
             return web.json_response({'error': str(e)}, status=500)
-
-# 注册API路由
-api_instance = FileUploadAPI()
-for route in api_instance.routes:
-    PromptServer.instance.app.router.add_route(route.method, route.path, route.handler)
