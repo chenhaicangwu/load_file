@@ -1,5 +1,5 @@
-import { app } from "/extensions/scripts/app.js";
-import { api } from "/extensions/scripts/api.js";
+import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
 
 // 文件上传工具类
 class FileUploader {
