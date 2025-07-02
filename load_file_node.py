@@ -35,9 +35,12 @@ class LoadFile:
         input_dir = folder_paths.get_input_directory()
         files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
         
+        # 注意：ComfyUI中，文件上传按钮只能通过{"image_upload": True}参数启用
+        # 即使我们处理的不仅仅是图像，也必须使用这个参数
+        # 使用{"file_upload": True}不会显示上传按钮
         return {
             "required": {
-                "file": (sorted(files), {"file_upload": True, "tooltip": "要加载的文件"}),
+                "file": (sorted(files), {"image_upload": True, "tooltip": "要加载的文件"}),
                 "file_type": (["auto", "image", "model", "latent", "video", "text"], 
                              {"default": "auto", "tooltip": "文件类型，选择'auto'将自动检测"})
             }
@@ -50,46 +53,39 @@ class LoadFile:
     RETURN_NAMES = ()
     FUNCTION = "load_file"
     
-    def load_file(self, file, file_type):
+    def load_file(self, file, file_type="auto"):
         """
         加载文件并根据文件类型返回相应的数据
         
         参数:
             file (str): 文件名
-            file_type (str): 文件类型，可以是'auto'、'image'、'model'、'latent'、'video'或'text'
+            file_type (str, optional): 文件类型，可以是"auto"、"image"、"model"、"latent"、"video"或"text"。默认为"auto"。
             
         返回:
-            根据文件类型返回不同的数据
+            tuple: 根据文件类型返回不同的数据
         """
-        try:
-            # 获取文件路径
-            file_path = folder_paths.get_annotated_filepath(file)
-            
-            print(f"正在加载文件: {file_path}")
-            
-            # 如果文件类型为'auto'，则自动检测文件类型
-            detected_type = file_type
-            if file_type == "auto":
-                detected_type = self.detect_file_type(file_path)
-                print(f"自动检测到文件类型: {detected_type}")
-            
-            # 根据文件类型调用相应的加载函数
-            if detected_type == "image":
-                return self.load_image(file_path)
-            elif detected_type == "model":
-                return self.load_model(file_path)
-            elif detected_type == "latent":
-                return self.load_latent(file_path)
-            elif detected_type == "video":
-                return self.load_video(file_path)
-            elif detected_type == "text":
-                return self.load_text(file_path)
-            else:
-                raise ValueError(f"不支持的文件类型: {detected_type}")
-        except Exception as e:
-            print(f"加载文件时出错: {e}")
-            print(traceback.format_exc())
-            raise RuntimeError(f"加载文件失败: {str(e)}")
+        # 获取文件路径
+        file_path = folder_paths.get_annotated_filepath(file)
+        print(f"加载文件: {file_path}")
+        
+        # 如果文件类型为"auto"，则自动检测文件类型
+        if file_type == "auto":
+            file_type = self.detect_file_type(file_path)
+            print(f"自动检测到文件类型: {file_type}")
+        
+        # 根据文件类型调用相应的加载函数
+        if file_type == "image":
+            return self.load_image(file_path)
+        elif file_type == "model":
+            return self.load_model(file_path)
+        elif file_type == "latent":
+            return self.load_latent(file_path)
+        elif file_type == "video":
+            return self.load_video(file_path)
+        elif file_type == "text":
+            return self.load_text(file_path)
+        else:
+            raise ValueError(f"不支持的文件类型: {file_type}")
     
     def detect_file_type(self, file_path):
         """
@@ -99,100 +95,33 @@ class LoadFile:
             file_path (str): 文件路径
             
         返回:
-            str: 文件类型，可以是'image'、'model'、'latent'、'video'或'text'
+            str: 文件类型，可以是"image"、"model"、"latent"、"video"或"text"
         """
         # 获取文件扩展名（小写）
         ext = os.path.splitext(file_path)[1].lower()
         
         # 根据扩展名判断文件类型
         if ext in self.IMAGE_EXTENSIONS:
-            print(f"通过扩展名 {ext} 识别为图像文件")
             return "image"
         elif ext in self.LATENT_EXTENSIONS:
-            print(f"通过扩展名 {ext} 识别为潜在空间文件")
             return "latent"
+        elif ext in self.MODEL_EXTENSIONS:
+            return "model"
         elif ext in self.VIDEO_EXTENSIONS:
-            print(f"通过扩展名 {ext} 识别为视频文件")
             return "video"
         elif ext in self.TEXT_EXTENSIONS:
-            print(f"通过扩展名 {ext} 识别为文本文件")
             return "text"
-        elif ext in self.MODEL_EXTENSIONS:
-            print(f"通过扩展名 {ext} 识别为模型文件")
-            # 对于模型文件，尝试进一步检查文件内容以确定具体的模型类型
-            try:
-                # 使用安全的加载方式检查模型文件
-                if ext == '.safetensors':
-                    # 尝试加载元数据以检查模型类型
-                    try:
-                        metadata = comfy.utils.load_metadata_from_safetensors(file_path)
-                        if metadata:
-                            print(f"从safetensors元数据中检测到模型信息: {list(metadata.keys())[:10]}")
-                            # 根据元数据判断模型类型
-                            if any(key in metadata for key in ["sd_model_name", "ss_sd_model_name", "model_config"]):
-                                return "model"
-                            elif "vae" in metadata or "vae_config" in metadata:
-                                return "model"  # VAE模型
-                    except Exception as e:
-                        print(f"加载safetensors元数据失败: {e}")
-                
-                # 如果没有明确的元数据或不是safetensors文件，尝试通过文件大小和名称判断
-                file_size = os.path.getsize(file_path) / (1024 * 1024)  # 转换为MB
-                file_name = os.path.basename(file_path).lower()
-                
-                print(f"文件大小: {file_size:.2f} MB")
-                
-                # 根据文件名中的关键词判断
-                if any(keyword in file_name for keyword in ["vae", "autoencoder"]):
-                    print(f"通过文件名关键词识别为VAE模型")
-                    return "model"
-                elif any(keyword in file_name for keyword in ["lora", "lycoris"]):
-                    print(f"通过文件名关键词识别为LoRA模型")
-                    return "model"
-                elif any(keyword in file_name for keyword in ["clip", "text_encoder"]):
-                    print(f"通过文件名关键词识别为CLIP模型")
-                    return "model"
-                elif any(keyword in file_name for keyword in ["unet", "diffusion"]):
-                    print(f"通过文件名关键词识别为UNet模型")
-                    return "model"
-                
-                # 如果无法通过文件名判断，则根据文件大小判断
-                # 大多数完整模型文件大小超过1GB
-                if file_size > 1000:
-                    print(f"通过文件大小识别为完整模型")
-                    return "model"
-                # VAE模型通常在150-350MB之间
-                elif 100 < file_size < 400:
-                    print(f"通过文件大小识别可能为VAE模型")
-                    return "model"
-                # LoRA模型通常小于100MB
-                elif file_size < 100:
-                    print(f"通过文件大小识别可能为LoRA模型")
-                    return "model"
-                
-                # 默认为模型文件
-                return "model"
-            except Exception as e:
-                print(f"模型文件类型检测失败: {e}")
-                # 如果检测失败，默认为模型文件
-                return "model"
-        else:
-            # 对于未知扩展名的文件，尝试通过内容判断
-            try:
-                # 尝试作为图像打开
-                Image.open(file_path)
-                print(f"通过内容识别为图像文件")
-                return "image"
-            except Exception as e:
-                print(f"尝试作为图像打开失败: {e}")
-                # 检查文件大小
-                file_size = os.path.getsize(file_path) / (1024 * 1024)  # 转换为MB
-                if file_size > 100:  # 如果文件大于100MB，可能是模型文件
-                    print(f"通过文件大小 {file_size:.2f} MB 推测可能为模型文件")
-                    return "model"
-                else:
-                    print(f"默认识别为文本文件")
-                    return "text"
+        
+        # 如果无法根据扩展名判断，尝试根据文件内容判断
+        try:
+            # 尝试作为图像打开
+            Image.open(file_path)
+            return "image"
+        except:
+            pass
+        
+        # 如果无法判断，默认为文本
+        return "text"
     
     def load_image(self, image_path):
         """
@@ -206,27 +135,27 @@ class LoadFile:
         """
         # 使用与LoadImage节点相同的加载逻辑
         img = node_helpers.pillow(Image.open, image_path)
-        
+
         output_images = []
         output_masks = []
         w, h = None, None
-        
+
         excluded_formats = ['MPO']
-        
+
         for i in ImageSequence.Iterator(img):
             i = node_helpers.pillow(ImageOps.exif_transpose, i)
-            
+
             if i.mode == 'I':
                 i = i.point(lambda i: i * (1 / 255))
             image = i.convert("RGB")
-            
+
             if len(output_images) == 0:
                 w = image.size[0]
                 h = image.size[1]
-            
+
             if image.size[0] != w or image.size[1] != h:
                 continue
-            
+
             image = np.array(image).astype(np.float32) / 255.0
             image = torch.from_numpy(image)[None,]
             if 'A' in i.getbands():
@@ -239,14 +168,14 @@ class LoadFile:
                 mask = torch.zeros((64,64), dtype=torch.float32, device="cpu")
             output_images.append(image)
             output_masks.append(mask.unsqueeze(0))
-        
+
         if len(output_images) > 1 and img.format not in excluded_formats:
             output_image = torch.cat(output_images, dim=0)
             output_mask = torch.cat(output_masks, dim=0)
         else:
             output_image = output_images[0]
             output_mask = output_masks[0]
-        
+
         return (output_image, output_mask)
     
     def load_latent(self, latent_path):
