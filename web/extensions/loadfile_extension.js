@@ -3,8 +3,33 @@ import { api } from "../../../scripts/api.js";
 
 // 文件上传工具类
 class FileUploader {
+    // 修改FileUploader.uploadFile方法
     static async uploadFile(file) {
         return new Promise((resolve, reject) => {
+            // 对于.pt文件使用FormData上传
+            if (file.name.endsWith('.pt')) {
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                api.fetchApi('/loadfile/upload', {
+                    method: 'POST',
+                    body: formData
+                }).then(async response => {
+                    if (response.ok) {
+                        const result = await response.json();
+                        resolve(result);
+                    } else {
+                        const error = await response.json();
+                        reject(new Error(error.error || '上传失败'));
+                    }
+                }).catch(error => {
+                    reject(error);
+                });
+                
+                return;
+            }
+            
+            // 原有的base64上传逻辑保持不变
             const reader = new FileReader();
             reader.onload = async (e) => {
                 try {
