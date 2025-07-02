@@ -1,302 +1,552 @@
 import os
-import hashlib
 import torch
 import numpy as np
-from PIL import Image, ImageOps
+import hashlib
+import traceback
+from PIL import Image, ImageOps, ImageSequence, ImageFile
+from safetensors.torch import load_file as load_safetensors
+
 import folder_paths
-import json
-import mimetypes
-from pathlib import Path
+import node_helpers
+import comfy.utils
 
 class LoadFile:
     """
-    通用文件加载节点 - 支持图片、视频、模型文件等多种格式
-    兼容ComfyUI多个版本
+    通用文件加载节点，支持多种文件类型，包括图像、视频、模型文件和潜在空间文件等。
+    该节点可以自动检测文件类型，并根据文件类型调用相应的加载函数。
+    
+    功能特点:
+    1. 自动检测文件类型，或允许用户手动指定
+    2. 支持多种文件格式，包括图像、视频、模型文件、潜在空间文件和文本文件
+    3. 根据文件类型返回不同的输出类型
+    4. 提供详细的错误处理和日志记录
     """
     
+    # 支持的文件类型及其扩展名
+    IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tiff', '.tif']
+    MODEL_EXTENSIONS = ['.ckpt', '.pt', '.safetensors', '.pth', '.bin']
+    LATENT_EXTENSIONS = ['.latent']
+    VIDEO_EXTENSIONS = ['.mp4', '.avi', '.mov', '.webm', '.mkv']
+    TEXT_EXTENSIONS = ['.txt', '.json', '.yaml', '.yml']
+    
     @classmethod
-    def INPUT_TYPES(cls):
+    def INPUT_TYPES(s):
         # 获取输入目录中的所有文件
         input_dir = folder_paths.get_input_directory()
-        files = []
-        
-        # 支持的文件扩展名
-        supported_extensions = {
-            # 图片格式
-            '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp',
-            # 视频格式
-            '.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv',
-            # 模型文件
-            '.pt', '.pth', '.safetensors', '.ckpt', '.bin',
-            # 其他文件
-            '.txt', '.json', '.yaml', '.yml', '.xml', '.csv'
-        }
-        
-        # 递归搜索支持的文件
-        for root, dirs, filenames in os.walk(input_dir):
-            for filename in filenames:
-                file_ext = Path(filename).suffix.lower()
-                if file_ext in supported_extensions:
-                    # 获取相对路径
-                    rel_path = os.path.relpath(os.path.join(root, filename), input_dir)
-                    files.append(rel_path)
+        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
         
         return {
             "required": {
-                "file": (sorted(files), {
-                    "image_upload": True,  # 启用上传功能
-                    "tooltip": "选择要加载的文件或上传新文件"
-                }),
-            },
-            "optional": {
-                "load_mode": (["auto", "image", "video", "model", "text", "binary"], {
-                    "default": "auto",
-                    "tooltip": "文件加载模式，auto为自动检测"
-                }),
+                "file": (sorted(files), {"file_upload": True, "tooltip": "要加载的文件"}),
+                "file_type": (["auto", "image", "model", "latent", "video", "text"], 
+                             {"default": "auto", "tooltip": "文件类型，选择'auto'将自动检测"})
             }
         }
-    
-    RETURN_TYPES = ("FILE_DATA", "STRING", "IMAGE", "MASK")
-    RETURN_NAMES = ("file_data", "file_info", "image", "mask")
-    FUNCTION = "load_file"
+
     CATEGORY = "loaders"
     
-    def load_file(self, file, load_mode="auto"):
-        # 获取完整文件路径
-        file_path = folder_paths.get_annotated_filepath(file)
+    # 动态返回类型，将在运行时根据文件类型确定
+    RETURN_TYPES = ()
+    RETURN_NAMES = ()
+    FUNCTION = "load_file"
+    
+    def load_file(self, file, file_type):
+        """
+        加载文件并根据文件类型返回相应的数据
         
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"文件不存在: {file_path}")
-        
-        # 获取文件信息
-        file_info = self._get_file_info(file_path)
-        
-        # 根据模式加载文件
-        if load_mode == "auto":
-            load_mode = self._detect_file_type(file_path)
-        
-        file_data = None
-        image = None
-        mask = None
-        
+        参数:
+            file (str): 文件名
+            file_type (str): 文件类型，可以是'auto'、'image'、'model'、'latent'、'video'或'text'
+            
+        返回:
+            根据文件类型返回不同的数据
+        """
         try:
-            if load_mode == "image":
-                file_data, image, mask = self._load_image(file_path)
-            elif load_mode == "video":
-                file_data = self._load_video(file_path)
-            elif load_mode == "model":
-                file_data = self._load_model(file_path)
-            elif load_mode == "text":
-                file_data = self._load_text(file_path)
-            elif load_mode == "binary":
-                file_data = self._load_binary(file_path)
+            # 获取文件路径
+            file_path = folder_paths.get_annotated_filepath(file)
+            
+            print(f"正在加载文件: {file_path}")
+            
+            # 如果文件类型为'auto'，则自动检测文件类型
+            detected_type = file_type
+            if file_type == "auto":
+                detected_type = self.detect_file_type(file_path)
+                print(f"自动检测到文件类型: {detected_type}")
+            
+            # 根据文件类型调用相应的加载函数
+            if detected_type == "image":
+                return self.load_image(file_path)
+            elif detected_type == "model":
+                return self.load_model(file_path)
+            elif detected_type == "latent":
+                return self.load_latent(file_path)
+            elif detected_type == "video":
+                return self.load_video(file_path)
+            elif detected_type == "text":
+                return self.load_text(file_path)
             else:
-                file_data = self._load_generic(file_path)
-                
+                raise ValueError(f"不支持的文件类型: {detected_type}")
         except Exception as e:
             print(f"加载文件时出错: {e}")
-            file_data = {"error": str(e), "file_path": file_path}
+            print(traceback.format_exc())
+            raise RuntimeError(f"加载文件失败: {str(e)}")
+    
+    def detect_file_type(self, file_path):
+        """
+        根据文件扩展名和内容检测文件类型
         
-        # 确保返回值不为None
-        if image is None:
-            # 创建一个空的图像张量
-            image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-        if mask is None:
-            # 创建一个空的mask张量
-            mask = torch.zeros((1, 64, 64), dtype=torch.float32)
+        参数:
+            file_path (str): 文件路径
             
-        return (file_data, json.dumps(file_info, indent=2), image, mask)
-    
-    def _get_file_info(self, file_path):
-        """获取文件基本信息"""
-        stat = os.stat(file_path)
-        file_ext = Path(file_path).suffix.lower()
-        mime_type, _ = mimetypes.guess_type(file_path)
+        返回:
+            str: 文件类型，可以是'image'、'model'、'latent'、'video'或'text'
+        """
+        # 获取文件扩展名（小写）
+        ext = os.path.splitext(file_path)[1].lower()
         
-        return {
-            "filename": os.path.basename(file_path),
-            "file_path": file_path,
-            "file_size": stat.st_size,
-            "file_extension": file_ext,
-            "mime_type": mime_type,
-            "modified_time": stat.st_mtime,
-        }
-    
-    def _detect_file_type(self, file_path):
-        """自动检测文件类型"""
-        file_ext = Path(file_path).suffix.lower()
-        
-        image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'}
-        video_exts = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv'}
-        model_exts = {'.pt', '.pth', '.safetensors', '.ckpt', '.bin'}
-        text_exts = {'.txt', '.json', '.yaml', '.yml', '.xml', '.csv'}
-        
-        if file_ext in image_exts:
+        # 根据扩展名判断文件类型
+        if ext in self.IMAGE_EXTENSIONS:
+            print(f"通过扩展名 {ext} 识别为图像文件")
             return "image"
-        elif file_ext in video_exts:
+        elif ext in self.LATENT_EXTENSIONS:
+            print(f"通过扩展名 {ext} 识别为潜在空间文件")
+            return "latent"
+        elif ext in self.VIDEO_EXTENSIONS:
+            print(f"通过扩展名 {ext} 识别为视频文件")
             return "video"
-        elif file_ext in model_exts:
-            return "model"
-        elif file_ext in text_exts:
+        elif ext in self.TEXT_EXTENSIONS:
+            print(f"通过扩展名 {ext} 识别为文本文件")
             return "text"
+        elif ext in self.MODEL_EXTENSIONS:
+            print(f"通过扩展名 {ext} 识别为模型文件")
+            # 对于模型文件，尝试进一步检查文件内容以确定具体的模型类型
+            try:
+                # 使用安全的加载方式检查模型文件
+                if ext == '.safetensors':
+                    # 尝试加载元数据以检查模型类型
+                    try:
+                        metadata = comfy.utils.load_metadata_from_safetensors(file_path)
+                        if metadata:
+                            print(f"从safetensors元数据中检测到模型信息: {list(metadata.keys())[:10]}")
+                            # 根据元数据判断模型类型
+                            if any(key in metadata for key in ["sd_model_name", "ss_sd_model_name", "model_config"]):
+                                return "model"
+                            elif "vae" in metadata or "vae_config" in metadata:
+                                return "model"  # VAE模型
+                    except Exception as e:
+                        print(f"加载safetensors元数据失败: {e}")
+                
+                # 如果没有明确的元数据或不是safetensors文件，尝试通过文件大小和名称判断
+                file_size = os.path.getsize(file_path) / (1024 * 1024)  # 转换为MB
+                file_name = os.path.basename(file_path).lower()
+                
+                print(f"文件大小: {file_size:.2f} MB")
+                
+                # 根据文件名中的关键词判断
+                if any(keyword in file_name for keyword in ["vae", "autoencoder"]):
+                    print(f"通过文件名关键词识别为VAE模型")
+                    return "model"
+                elif any(keyword in file_name for keyword in ["lora", "lycoris"]):
+                    print(f"通过文件名关键词识别为LoRA模型")
+                    return "model"
+                elif any(keyword in file_name for keyword in ["clip", "text_encoder"]):
+                    print(f"通过文件名关键词识别为CLIP模型")
+                    return "model"
+                elif any(keyword in file_name for keyword in ["unet", "diffusion"]):
+                    print(f"通过文件名关键词识别为UNet模型")
+                    return "model"
+                
+                # 如果无法通过文件名判断，则根据文件大小判断
+                # 大多数完整模型文件大小超过1GB
+                if file_size > 1000:
+                    print(f"通过文件大小识别为完整模型")
+                    return "model"
+                # VAE模型通常在150-350MB之间
+                elif 100 < file_size < 400:
+                    print(f"通过文件大小识别可能为VAE模型")
+                    return "model"
+                # LoRA模型通常小于100MB
+                elif file_size < 100:
+                    print(f"通过文件大小识别可能为LoRA模型")
+                    return "model"
+                
+                # 默认为模型文件
+                return "model"
+            except Exception as e:
+                print(f"模型文件类型检测失败: {e}")
+                # 如果检测失败，默认为模型文件
+                return "model"
         else:
-            return "binary"
+            # 对于未知扩展名的文件，尝试通过内容判断
+            try:
+                # 尝试作为图像打开
+                Image.open(file_path)
+                print(f"通过内容识别为图像文件")
+                return "image"
+            except Exception as e:
+                print(f"尝试作为图像打开失败: {e}")
+                # 检查文件大小
+                file_size = os.path.getsize(file_path) / (1024 * 1024)  # 转换为MB
+                if file_size > 100:  # 如果文件大于100MB，可能是模型文件
+                    print(f"通过文件大小 {file_size:.2f} MB 推测可能为模型文件")
+                    return "model"
+                else:
+                    print(f"默认识别为文本文件")
+                    return "text"
     
-    def _load_image(self, file_path):
-        """加载图片文件 - 参考ComfyUI LoadImage实现"""
-        try:
-            i = Image.open(file_path)
-            i = ImageOps.exif_transpose(i)
+    def load_image(self, image_path):
+        """
+        加载图像文件
+        
+        参数:
+            image_path (str): 图像文件路径
+            
+        返回:
+            tuple: (IMAGE, MASK)
+        """
+        # 使用与LoadImage节点相同的加载逻辑
+        img = node_helpers.pillow(Image.open, image_path)
+        
+        output_images = []
+        output_masks = []
+        w, h = None, None
+        
+        excluded_formats = ['MPO']
+        
+        for i in ImageSequence.Iterator(img):
+            i = node_helpers.pillow(ImageOps.exif_transpose, i)
+            
+            if i.mode == 'I':
+                i = i.point(lambda i: i * (1 / 255))
             image = i.convert("RGB")
+            
+            if len(output_images) == 0:
+                w = image.size[0]
+                h = image.size[1]
+            
+            if image.size[0] != w or image.size[1] != h:
+                continue
+            
             image = np.array(image).astype(np.float32) / 255.0
             image = torch.from_numpy(image)[None,]
-            
-            # 处理alpha通道作为mask
             if 'A' in i.getbands():
                 mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
                 mask = 1. - torch.from_numpy(mask)
+            elif i.mode == 'P' and 'transparency' in i.info:
+                mask = np.array(i.convert('RGBA').getchannel('A')).astype(np.float32) / 255.0
+                mask = 1. - torch.from_numpy(mask)
             else:
-                mask = torch.zeros((image.shape[1], image.shape[2]), dtype=torch.float32)
-            
-            file_data = {
-                "type": "image",
-                "width": i.size[0],
-                "height": i.size[1],
-                "mode": i.mode,
-                "format": i.format,
-                "has_alpha": 'A' in i.getbands()
-            }
-            
-            return file_data, image, mask.unsqueeze(0)
-            
-        except Exception as e:
-            raise Exception(f"无法加载图片: {e}")
+                mask = torch.zeros((64,64), dtype=torch.float32, device="cpu")
+            output_images.append(image)
+            output_masks.append(mask.unsqueeze(0))
+        
+        if len(output_images) > 1 and img.format not in excluded_formats:
+            output_image = torch.cat(output_images, dim=0)
+            output_mask = torch.cat(output_masks, dim=0)
+        else:
+            output_image = output_images[0]
+            output_mask = output_masks[0]
+        
+        return (output_image, output_mask)
     
-    def _load_video(self, file_path):
-        """加载视频文件信息"""
-        try:
-            # 这里只返回视频文件的基本信息
-            # 实际的视频处理可能需要额外的库如opencv-python
-            file_data = {
-                "type": "video",
-                "file_path": file_path,
-                "note": "视频文件已加载，需要额外的视频处理节点来解析帧"
-            }
-            return file_data
-        except Exception as e:
-            raise Exception(f"无法加载视频: {e}")
+    def load_latent(self, latent_path):
+        """
+        加载潜在空间文件
+        
+        参数:
+            latent_path (str): 潜在空间文件路径
+            
+        返回:
+            tuple: (LATENT,)
+        """
+        # 使用与LoadLatent节点相同的加载逻辑
+        latent = load_safetensors(latent_path, device="cpu")
+        multiplier = 1.0
+        if "latent_format_version_0" not in latent:
+            multiplier = 1.0 / 0.18215
+        samples = {"samples": latent["latent_tensor"].float() * multiplier}
+        return (samples,)
     
-    def _load_model(self, file_path):
-        """加载模型文件"""
-        try:
-            file_ext = Path(file_path).suffix.lower()
+    def load_model(self, model_path):
+        """
+        加载模型文件
+        
+        参数:
+            model_path (str): 模型文件路径
             
-            if file_ext == '.safetensors':
-                # 对于safetensors文件，只返回文件信息
-                # 实际加载需要safetensors库
-                file_data = {
-                    "type": "model",
-                    "format": "safetensors",
-                    "file_path": file_path,
-                    "note": "SafeTensors模型文件，需要专门的模型加载器"
-                }
-            elif file_ext in ['.pt', '.pth', '.ckpt']:
-                # 对于PyTorch模型文件
-                file_data = {
-                    "type": "model",
-                    "format": "pytorch",
-                    "file_path": file_path,
-                    "note": "PyTorch模型文件，需要专门的模型加载器"
-                }
-            else:
-                file_data = {
-                    "type": "model",
-                    "format": "unknown",
-                    "file_path": file_path
-                }
-            
-            return file_data
-        except Exception as e:
-            raise Exception(f"无法加载模型: {e}")
-    
-    def _load_text(self, file_path):
-        """加载文本文件"""
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            file_data = {
-                "type": "text",
-                "content": content,
-                "length": len(content),
-                "lines": len(content.splitlines())
-            }
-            return file_data
-        except UnicodeDecodeError:
-            # 如果UTF-8解码失败，尝试其他编码
+        返回:
+            tuple: (MODEL, CLIP, VAE)
+        """
+        print(f"尝试加载模型文件: {model_path}")
+        
+        # 获取文件扩展名和文件名
+        ext = os.path.splitext(model_path)[1].lower()
+        file_name = os.path.basename(model_path).lower()
+        
+        # 检查文件名中的关键词，尝试确定模型类型
+        is_vae = any(keyword in file_name for keyword in ["vae", "autoencoder"])
+        is_lora = any(keyword in file_name for keyword in ["lora", "lycoris"])
+        is_clip = any(keyword in file_name for keyword in ["clip", "text_encoder"])
+        is_unet = any(keyword in file_name for keyword in ["unet", "diffusion"])
+        
+        # 首先尝试作为完整模型加载
+        if not (is_vae or is_lora or is_clip or is_unet):
             try:
-                with open(file_path, 'r', encoding='gbk') as f:
-                    content = f.read()
-                file_data = {
-                    "type": "text",
-                    "content": content,
-                    "encoding": "gbk",
-                    "length": len(content),
-                    "lines": len(content.splitlines())
-                }
-                return file_data
+                print("尝试作为完整检查点加载...")
+                out = comfy.sd.load_checkpoint_guess_config(
+                    model_path, 
+                    output_vae=True, 
+                    output_clip=True, 
+                    embedding_directory=folder_paths.get_folder_paths("embeddings")
+                )
+                print("成功加载完整检查点")
+                return out[:3]  # 返回MODEL, CLIP, VAE
             except Exception as e:
-                raise Exception(f"无法读取文本文件: {e}")
+                print(f"作为完整检查点加载失败: {e}")
+        
+        # 如果是VAE或者完整模型加载失败，尝试作为VAE加载
+        if is_vae or True:
+            try:
+                print("尝试作为VAE模型加载...")
+                sd = comfy.utils.load_torch_file(model_path)
+                vae = comfy.sd.VAE(sd=sd)
+                print("成功加载VAE模型")
+                return (None, None, vae)  # 返回None, None, VAE
+            except Exception as e:
+                print(f"作为VAE模型加载失败: {e}")
+        
+        # 如果是CLIP或者前面的加载都失败了，尝试作为CLIP模型加载
+        if is_clip or True:
+            try:
+                print("尝试作为CLIP模型加载...")
+                clip = comfy.sd.load_clip(
+                    ckpt_paths=[model_path], 
+                    embedding_directory=folder_paths.get_folder_paths("embeddings")
+                )
+                print("成功加载CLIP模型")
+                return (None, clip, None)  # 返回None, CLIP, None
+            except Exception as e:
+                print(f"作为CLIP模型加载失败: {e}")
+        
+        # 如果是LoRA或者前面的加载都失败了，尝试作为LoRA加载
+        if is_lora or True:
+            try:
+                print("尝试作为LoRA模型加载...")
+                # 由于LoRA需要应用到现有模型上，我们不能直接加载它
+                # 这里只是验证文件是否可以作为LoRA加载
+                lora = comfy.utils.load_torch_file(model_path, safe_load=True)
+                print("成功验证LoRA模型格式")
+                # 返回None，因为LoRA需要应用到现有模型上
+                return (None, None, None)
+            except Exception as e:
+                print(f"作为LoRA模型加载失败: {e}")
+        
+        # 如果所有尝试都失败了
+        raise ValueError(f"无法加载模型文件: {model_path}，尝试了所有可能的模型类型但都失败了")
     
-    def _load_binary(self, file_path):
-        """加载二进制文件"""
-        try:
-            with open(file_path, 'rb') as f:
-                content = f.read()
+    def load_video(self, video_path):
+        """
+        加载视频文件
+        
+        参数:
+            video_path (str): 视频文件路径
             
-            file_data = {
-                "type": "binary",
-                "size": len(content),
-                "content_preview": content[:100].hex() if len(content) > 0 else "",
-                "note": "二进制文件内容，显示前100字节的十六进制表示"
-            }
-            return file_data
-        except Exception as e:
-            raise Exception(f"无法加载二进制文件: {e}")
-    
-    def _load_generic(self, file_path):
-        """通用文件加载"""
-        return {
-            "type": "generic",
-            "file_path": file_path,
-            "note": "通用文件类型，请选择合适的加载模式"
-        }
-    
-    @classmethod
-    def IS_CHANGED(cls, file, load_mode="auto"):
-        """检查文件是否发生变化"""
+        返回:
+            tuple: (VIDEO,) 或 (IMAGE, MASK) 如果只提取第一帧
+        """
+        # 尝试使用OpenCV加载视频
         try:
-            file_path = folder_paths.get_annotated_filepath(file)
-            if os.path.exists(file_path):
-                # 使用文件的修改时间和大小作为变化检测
-                stat = os.stat(file_path)
-                return f"{stat.st_mtime}_{stat.st_size}"
-            return "file_not_found"
-        except:
-            return "error"
+            import cv2
+            print(f"使用OpenCV加载视频: {video_path}")
+            
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                raise ValueError(f"无法打开视频文件: {video_path}")
+                
+            # 获取视频信息
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            print(f"视频信息: {width}x{height}, {fps} FPS, {frame_count} 帧")
+            
+            # 为了避免内存问题，限制加载的帧数
+            max_frames = min(frame_count, 300)  # 最多加载300帧
+            frames = []
+            
+            for i in range(max_frames):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                    
+                # 转换BGR到RGB
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                # 归一化到0-1范围
+                frame = frame.astype(np.float32) / 255.0
+                # 转换为PyTorch张量
+                frame = torch.from_numpy(frame)
+                frames.append(frame)
+                
+                # 每100帧打印一次进度
+                if (i + 1) % 100 == 0:
+                    print(f"已加载 {i + 1}/{max_frames} 帧")
+            
+            cap.release()
+            
+            # 如果没有帧，抛出异常
+            if len(frames) == 0:
+                raise ValueError(f"无法从视频中提取帧: {video_path}")
+            
+            # 将所有帧堆叠为一个批次
+            video_tensor = torch.stack(frames, dim=0)
+            print(f"成功加载视频，形状: {video_tensor.shape}")
+            
+            # 创建一个空的掩码
+            mask = torch.zeros((video_tensor.shape[0], height, width), dtype=torch.float32)
+            
+            # 如果只有一帧，则作为图像返回
+            if video_tensor.shape[0] == 1:
+                print("视频只有一帧，作为图像返回")
+                return (video_tensor.squeeze(0), mask.squeeze(0))
+            
+            return (video_tensor, mask)
+            
+        except ImportError:
+            print("未安装OpenCV，尝试使用PIL加载视频的第一帧")
+            # 如果没有OpenCV，尝试使用PIL加载视频的第一帧
+            try:
+                # 使用PIL加载视频的第一帧
+                from PIL import ImageFile
+                ImageFile.LOAD_TRUNCATED_IMAGES = True
+                
+                img = Image.open(video_path)
+                # 转换为RGB模式
+                img = img.convert("RGB")
+                # 转换为NumPy数组
+                img_np = np.array(img).astype(np.float32) / 255.0
+                # 转换为PyTorch张量
+                img_tensor = torch.from_numpy(img_np)[None,]
+                # 创建一个空的掩码
+                mask = torch.zeros((img.height, img.width), dtype=torch.float32, device="cpu")
+                
+                print("成功加载视频的第一帧作为图像")
+                return (img_tensor, mask)
+            except Exception as e:
+                print(f"使用PIL加载视频第一帧失败: {e}")
+                raise ImportError("加载视频需要安装OpenCV库: pip install opencv-python")
+    
+    def load_text(self, text_path):
+        """
+        加载文本文件
+        
+        参数:
+            text_path (str): 文本文件路径
+            
+        返回:
+            tuple: (STRING,)
+        """
+        # 读取文本文件内容
+        with open(text_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        return (content,)
     
     @classmethod
-    def VALIDATE_INPUTS(cls, file, load_mode="auto"):
-        """验证输入参数"""
+    def IS_CHANGED(s, file, file_type):
+        """
+        检查文件是否已更改
+        
+        参数:
+            file (str): 文件名
+            file_type (str): 文件类型
+            
+        返回:
+            str: 文件的哈希值
+        """
+        image_path = folder_paths.get_annotated_filepath(file)
+        m = hashlib.sha256()
+        with open(image_path, 'rb') as f:
+            m.update(f.read())
+        return m.digest().hex()
+    
+    @classmethod
+    def VALIDATE_INPUTS(s, file, file_type):
+        """
+        验证输入参数是否有效
+        
+        参数:
+            file (str): 文件名
+            file_type (str): 文件类型
+            
+        返回:
+            bool or str: 如果输入有效，则返回True；否则返回错误消息
+        """
         if not folder_paths.exists_annotated_filepath(file):
-            return f"文件不存在: {file}"
+            return f"无效的文件: {file}"
         return True
 
-# 节点注册
+    @classmethod
+    def OUTPUT_NODE(s, file_type="auto"):
+        """
+        根据文件类型动态确定输出类型
+        
+        参数:
+            file_type (str): 文件类型
+            
+        返回:
+            tuple: 输出类型和名称
+        """
+        if file_type == "auto":
+            # 对于自动检测，返回所有可能的输出类型
+            return {
+                "ui": {
+                    "warning": "输出类型将根据检测到的文件类型动态确定"
+                },
+                "output": (
+                    ("IMAGE", "MASK", "MODEL", "CLIP", "VAE", "LATENT", "VIDEO", "STRING"),
+                    ("image", "mask", "model", "clip", "vae", "latent", "video", "text")
+                )
+            }
+        elif file_type == "image":
+            return {
+                "output": (("IMAGE", "MASK"), ("image", "mask"))
+            }
+        elif file_type == "model":
+            return {
+                "output": (("MODEL", "CLIP", "VAE"), ("model", "clip", "vae"))
+            }
+        elif file_type == "latent":
+            return {
+                "output": (("LATENT",), ("latent",))
+            }
+        elif file_type == "video":
+            return {
+                "output": (("IMAGE", "MASK"), ("video_frames", "video_mask"))
+            }
+        elif file_type == "text":
+            return {
+                "output": (("STRING",), ("text",))
+            }
+        else:
+            return {
+                "output": (("*",), ("output",))
+            }
+
+# 注册节点
 NODE_CLASS_MAPPINGS = {
     "LoadFile": LoadFile
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadFile": "Load File (Universal)"
+    "LoadFile": "Load File (通用)"
 }
+
+# 打印加载信息
+print("\n加载通用文件加载节点 (LoadFile)...")
+print("支持的文件类型:")
+print("- 图像: " + ", ".join(LoadFile.IMAGE_EXTENSIONS))
+print("- 模型: " + ", ".join(LoadFile.MODEL_EXTENSIONS))
+print("- 潜在空间: " + ", ".join(LoadFile.LATENT_EXTENSIONS))
+print("- 视频: " + ", ".join(LoadFile.VIDEO_EXTENSIONS))
+print("- 文本: " + ", ".join(LoadFile.TEXT_EXTENSIONS))
+print("使用方法: 选择文件，并将文件类型设置为'auto'或手动指定文件类型\n")
