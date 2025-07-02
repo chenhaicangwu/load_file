@@ -15,10 +15,18 @@ class FileUploadAPI:
     async def upload_file(self, request):
         """处理文件上传"""
         try:
-            # 获取上传的文件数据
-            data = await request.json()
-            filename = data.get('filename')
-            file_data = data.get('data')  # base64编码的文件数据
+            # 获取原始请求数据进行调试
+            raw_data = await request.text()
+            print(f"接收到的原始数据: {raw_data[:100]}...") # 只打印前100个字符避免日志过大
+            
+            try:
+                # 尝试解析JSON
+                data = json.loads(raw_data)
+                filename = data.get('filename')
+                file_data = data.get('data')  # base64编码的文件数据
+            except json.JSONDecodeError as e:
+                print(f"JSON解析错误: {str(e)}")
+                return web.json_response({'error': f'JSON解析失败: {str(e)}'}, status=400)
             
             if not filename or not file_data:
                 return web.json_response({'error': '缺少文件名或文件数据'}, status=400)
@@ -53,6 +61,7 @@ class FileUploadAPI:
             })
             
         except Exception as e:
+            print(f"文件上传异常: {str(e)}")
             return web.json_response({'error': str(e)}, status=500)
     
     async def list_files(self, request):
