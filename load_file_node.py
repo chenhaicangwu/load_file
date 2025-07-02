@@ -8,29 +8,27 @@ import json
 import mimetypes
 from pathlib import Path
 import shutil
-import tempfile
 
 class LoadFileWithButton:
     """
-    通用文件加载节点 - 支持通过按钮选择本地文件
-    兼容ComfyUI 2024年12月版本
+    通用文件加载节点 - 支持文件上传功能
+    模仿ComfyUI LoadImage节点的实现方式
     """
     
     @classmethod
     def INPUT_TYPES(cls):
+        # 获取input目录中的所有文件
+        input_dir = folder_paths.get_input_directory()
+        files = []
+        
+        if os.path.exists(input_dir):
+            for f in os.listdir(input_dir):
+                if os.path.isfile(os.path.join(input_dir, f)):
+                    files.append(f)
+        
         return {
             "required": {
-                "choose_file_button": ("BUTTON", {
-                    "default": "选择文件",
-                    "tooltip": "点击选择本地文件"
-                }),
-            },
-            "optional": {
-                "file_path": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "tooltip": "选中的文件路径（自动填充）"
-                }),
+                "file": (sorted(files), {"image_upload": True}),
                 "load_mode": (["auto", "image", "video", "model", "text", "binary"], {
                     "default": "auto",
                     "tooltip": "文件加载模式，auto为自动检测"
@@ -43,38 +41,28 @@ class LoadFileWithButton:
     FUNCTION = "load_file"
     CATEGORY = "loaders"
     
-    def load_file(self, choose_file_button, file_path="", load_mode="auto"):
-        if not file_path or not os.path.exists(file_path):
+    def load_file(self, file, load_mode="auto"):
+        # 获取文件完整路径
+        input_dir = folder_paths.get_input_directory()
+        file_path = os.path.join(input_dir, file)
+        
+        if not os.path.exists(file_path):
             # 返回默认值
             empty_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
             empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32)
             return (
-                {"error": "请先选择文件", "status": "no_file"},
-                json.dumps({"status": "请点击按钮选择文件"}, ensure_ascii=False),
+                {"error": "文件不存在", "status": "file_not_found"},
+                json.dumps({"status": "文件不存在"}, ensure_ascii=False),
                 empty_image,
                 empty_mask
             )
         
-        # 复制文件到ComfyUI的input目录
-        input_dir = folder_paths.get_input_directory()
-        filename = os.path.basename(file_path)
-        dest_path = os.path.join(input_dir, filename)
-        
-        # 如果文件不存在于input目录，则复制过去
-        if not os.path.exists(dest_path) or os.path.getmtime(file_path) > os.path.getmtime(dest_path):
-            try:
-                shutil.copy2(file_path, dest_path)
-                print(f"文件已复制到: {dest_path}")
-            except Exception as e:
-                print(f"复制文件失败: {e}")
-                dest_path = file_path  # 使用原始路径
-        
         # 获取文件信息
-        file_info = self._get_file_info(dest_path)
+        file_info = self._get_file_info(file_path)
         
         # 根据模式加载文件
         if load_mode == "auto":
-            load_mode = self._detect_file_type(dest_path)
+            load_mode = self._detect_file_type(file_path)
         
         file_data = None
         image = None
@@ -82,21 +70,21 @@ class LoadFileWithButton:
         
         try:
             if load_mode == "image":
-                file_data, image, mask = self._load_image(dest_path)
+                file_data, image, mask = self._load_image(file_path)
             elif load_mode == "video":
-                file_data = self._load_video(dest_path)
+                file_data = self._load_video(file_path)
             elif load_mode == "model":
-                file_data = self._load_model(dest_path)
+                file_data = self._load_model(file_path)
             elif load_mode == "text":
-                file_data = self._load_text(dest_path)
+                file_data = self._load_text(file_path)
             elif load_mode == "binary":
-                file_data = self._load_binary(dest_path)
+                file_data = self._load_binary(file_path)
             else:
-                file_data = self._load_generic(dest_path)
+                file_data = self._load_generic(file_path)
                 
         except Exception as e:
             print(f"加载文件时出错: {e}")
-            file_data = {"error": str(e), "file_path": dest_path}
+            file_data = {"error": str(e), "file_path": file_path}
         
         # 确保返回值不为None
         if image is None:
@@ -206,7 +194,8 @@ class LoadFileWithButton:
                 file_data = {
                     "type": "model",
                     "format": "unknown",
-                    "file_path": file_path
+                    "file_path": file_path,
+                    "note": "未知格式的模型文件"
                 }
             
             return file_data
@@ -216,54 +205,93 @@ class LoadFileWithButton:
     def _load_text(self, file_path):
         """加载文本文件"""
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+            # 尝试不同的编码
+            encodings = ['utf-8', 'gbk', 'gb2312', 'latin1']
+            content = None
+            used_encoding = None
+            
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    used_encoding = encoding
+                    break
+                except UnicodeDecodeError:
+                    continue
+            
+            if content is None:
+                raise Exception("无法解码文本文件")
             
             file_data = {
                 "type": "text",
                 "content": content,
+                "encoding": used_encoding,
                 "length": len(content),
                 "lines": len(content.splitlines())
             }
+            
             return file_data
-        except UnicodeDecodeError:
-            try:
-                with open(file_path, 'r', encoding='gbk') as f:
-                    content = f.read()
-                file_data = {
-                    "type": "text",
-                    "content": content,
-                    "encoding": "gbk",
-                    "length": len(content),
-                    "lines": len(content.splitlines())
-                }
-                return file_data
-            except Exception as e:
-                raise Exception(f"无法读取文本文件: {e}")
+        except Exception as e:
+            raise Exception(f"无法加载文本文件: {e}")
     
     def _load_binary(self, file_path):
         """加载二进制文件"""
         try:
             with open(file_path, 'rb') as f:
-                content = f.read()
+                data = f.read()
+            
+            # 生成文件哈希
+            file_hash = hashlib.md5(data).hexdigest()
             
             file_data = {
                 "type": "binary",
-                "size": len(content),
-                "content_preview": content[:100].hex() if len(content) > 0 else "",
-                "note": "二进制文件内容，显示前100字节的十六进制表示"
+                "size": len(data),
+                "hash": file_hash,
+                "preview": data[:100].hex() if len(data) > 0 else "",  # 前100字节的十六进制预览
+                "note": "二进制文件，显示前100字节的十六进制预览"
             }
+            
             return file_data
         except Exception as e:
             raise Exception(f"无法加载二进制文件: {e}")
     
     def _load_generic(self, file_path):
         """通用文件加载"""
-        return {
-            "type": "generic",
-            "file_path": file_path,
-            "note": "通用文件类型，请选择合适的加载模式"
-        }
+        try:
+            stat = os.stat(file_path)
+            file_data = {
+                "type": "generic",
+                "file_path": file_path,
+                "size": stat.st_size,
+                "note": "通用文件，仅提供基本信息"
+            }
+            return file_data
+        except Exception as e:
+            raise Exception(f"无法加载文件: {e}")
+    
+    @classmethod
+    def IS_CHANGED(cls, file, load_mode):
+        """检查文件是否发生变化"""
+        input_dir = folder_paths.get_input_directory()
+        file_path = os.path.join(input_dir, file)
+        
+        if not os.path.exists(file_path):
+            return float("NaN")
+        
+        # 使用文件修改时间和大小作为变化检测
+        stat = os.stat(file_path)
+        return f"{stat.st_mtime}_{stat.st_size}"
+    
+    @classmethod
+    def VALIDATE_INPUTS(cls, file, load_mode):
+        """验证输入参数"""
+        input_dir = folder_paths.get_input_directory()
+        file_path = os.path.join(input_dir, file)
+        
+        if not os.path.exists(file_path):
+            return f"文件不存在: {file}"
+        
+        return True
 
 # 节点注册
 NODE_CLASS_MAPPINGS = {
@@ -271,5 +299,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadFileWithButton": "Load File (Button)"
+    "LoadFileWithButton": "Load File (Upload)"
 }
