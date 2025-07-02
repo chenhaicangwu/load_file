@@ -7,17 +7,15 @@ import folder_paths
 import json
 import mimetypes
 from pathlib import Path
-import shutil
 
 class LoadFileWithButton:
     """
-    通用文件加载节点 - 支持文件上传功能
-    模仿ComfyUI LoadImage节点的实现方式
+    通用文件加载节点 - 支持任意文件类型上传
     """
     
     @classmethod
     def INPUT_TYPES(cls):
-        # 获取input目录中的所有文件
+        # 动态获取input目录中的所有文件
         input_dir = folder_paths.get_input_directory()
         files = []
         
@@ -26,9 +24,13 @@ class LoadFileWithButton:
                 if os.path.isfile(os.path.join(input_dir, f)):
                     files.append(f)
         
+        # 如果没有文件，提供一个默认选项
+        if not files:
+            files = ["请先上传文件"]
+        
         return {
             "required": {
-                "file": (sorted(files), {"image_upload": True}),
+                "file": (sorted(files), {}),
                 "load_mode": (["auto", "image", "video", "model", "text", "binary"], {
                     "default": "auto",
                     "tooltip": "文件加载模式，auto为自动检测"
@@ -36,23 +38,34 @@ class LoadFileWithButton:
             }
         }
     
-    RETURN_TYPES = ("FILE_DATA", "STRING", "IMAGE", "MASK")
+    RETURN_TYPES = ("*", "STRING", "IMAGE", "MASK")
     RETURN_NAMES = ("file_data", "file_info", "image", "mask")
     FUNCTION = "load_file"
     CATEGORY = "loaders"
+    OUTPUT_NODE = False
     
     def load_file(self, file, load_mode="auto"):
+        # 检查是否为默认提示文本
+        if file == "请先上传文件":
+            empty_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+            empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32)
+            return (
+                {"error": "请先上传文件", "status": "no_file"},
+                json.dumps({"status": "请使用上传按钮选择文件"}, ensure_ascii=False),
+                empty_image,
+                empty_mask
+            )
+        
         # 获取文件完整路径
         input_dir = folder_paths.get_input_directory()
         file_path = os.path.join(input_dir, file)
         
         if not os.path.exists(file_path):
-            # 返回默认值
             empty_image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
             empty_mask = torch.zeros((1, 64, 64), dtype=torch.float32)
             return (
                 {"error": "文件不存在", "status": "file_not_found"},
-                json.dumps({"status": "文件不存在"}, ensure_ascii=False),
+                json.dumps({"status": "文件不存在，请重新上传"}, ensure_ascii=False),
                 empty_image,
                 empty_mask
             )
@@ -116,7 +129,7 @@ class LoadFileWithButton:
         image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'}
         video_exts = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv'}
         model_exts = {'.pt', '.pth', '.safetensors', '.ckpt', '.bin'}
-        text_exts = {'.txt', '.json', '.yaml', '.yml', '.xml', '.csv'}
+        text_exts = {'.txt', '.json', '.yaml', '.yml', '.xml', '.csv', '.md'}
         
         if file_ext in image_exts:
             return "image"
@@ -130,7 +143,7 @@ class LoadFileWithButton:
             return "binary"
     
     def _load_image(self, file_path):
-        """加载图片文件 - 参考ComfyUI LoadImage实现"""
+        """加载图片文件"""
         try:
             i = Image.open(file_path)
             i = ImageOps.exif_transpose(i)
@@ -138,7 +151,6 @@ class LoadFileWithButton:
             image = np.array(image).astype(np.float32) / 255.0
             image = torch.from_numpy(image)[None,]
             
-            # 处理alpha通道作为mask
             if 'A' in i.getbands():
                 mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
                 mask = 1. - torch.from_numpy(mask)
@@ -161,137 +173,87 @@ class LoadFileWithButton:
     
     def _load_video(self, file_path):
         """加载视频文件信息"""
-        try:
-            file_data = {
-                "type": "video",
-                "file_path": file_path,
-                "note": "视频文件已加载，需要额外的视频处理节点来解析帧"
-            }
-            return file_data
-        except Exception as e:
-            raise Exception(f"无法加载视频: {e}")
+        return {
+            "type": "video",
+            "file_path": file_path,
+            "note": "视频文件已加载，需要额外的视频处理节点来解析帧"
+        }
     
     def _load_model(self, file_path):
         """加载模型文件"""
-        try:
-            file_ext = Path(file_path).suffix.lower()
-            
-            if file_ext == '.safetensors':
-                file_data = {
-                    "type": "model",
-                    "format": "safetensors",
-                    "file_path": file_path,
-                    "note": "SafeTensors模型文件，需要专门的模型加载器"
-                }
-            elif file_ext in ['.pt', '.pth', '.ckpt']:
-                file_data = {
-                    "type": "model",
-                    "format": "pytorch",
-                    "file_path": file_path,
-                    "note": "PyTorch模型文件，需要专门的模型加载器"
-                }
-            else:
-                file_data = {
-                    "type": "model",
-                    "format": "unknown",
-                    "file_path": file_path,
-                    "note": "未知格式的模型文件"
-                }
-            
-            return file_data
-        except Exception as e:
-            raise Exception(f"无法加载模型: {e}")
+        file_ext = Path(file_path).suffix.lower()
+        return {
+            "type": "model",
+            "format": file_ext[1:],  # 去掉点号
+            "file_path": file_path,
+            "note": f"{file_ext}模型文件，需要专门的模型加载器"
+        }
     
     def _load_text(self, file_path):
         """加载文本文件"""
-        try:
-            # 尝试不同的编码
-            encodings = ['utf-8', 'gbk', 'gb2312', 'latin1']
-            content = None
-            used_encoding = None
-            
-            for encoding in encodings:
-                try:
-                    with open(file_path, 'r', encoding=encoding) as f:
-                        content = f.read()
-                    used_encoding = encoding
-                    break
-                except UnicodeDecodeError:
-                    continue
-            
-            if content is None:
-                raise Exception("无法解码文本文件")
-            
-            file_data = {
-                "type": "text",
-                "content": content,
-                "encoding": used_encoding,
-                "length": len(content),
-                "lines": len(content.splitlines())
-            }
-            
-            return file_data
-        except Exception as e:
-            raise Exception(f"无法加载文本文件: {e}")
+        encodings = ['utf-8', 'gbk', 'gb2312', 'latin1']
+        content = None
+        used_encoding = None
+        
+        for encoding in encodings:
+            try:
+                with open(file_path, 'r', encoding=encoding) as f:
+                    content = f.read()
+                used_encoding = encoding
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if content is None:
+            raise Exception("无法解码文本文件")
+        
+        return {
+            "type": "text",
+            "content": content,
+            "encoding": used_encoding,
+            "length": len(content),
+            "lines": len(content.splitlines())
+        }
     
     def _load_binary(self, file_path):
         """加载二进制文件"""
-        try:
-            with open(file_path, 'rb') as f:
-                data = f.read()
-            
-            # 生成文件哈希
-            file_hash = hashlib.md5(data).hexdigest()
-            
-            file_data = {
-                "type": "binary",
-                "size": len(data),
-                "hash": file_hash,
-                "preview": data[:100].hex() if len(data) > 0 else "",  # 前100字节的十六进制预览
-                "note": "二进制文件，显示前100字节的十六进制预览"
-            }
-            
-            return file_data
-        except Exception as e:
-            raise Exception(f"无法加载二进制文件: {e}")
+        with open(file_path, 'rb') as f:
+            data = f.read()
+        
+        file_hash = hashlib.md5(data).hexdigest()
+        
+        return {
+            "type": "binary",
+            "size": len(data),
+            "hash": file_hash,
+            "preview": data[:100].hex() if len(data) > 0 else "",
+            "note": "二进制文件，显示前100字节的十六进制预览"
+        }
     
     def _load_generic(self, file_path):
         """通用文件加载"""
-        try:
-            stat = os.stat(file_path)
-            file_data = {
-                "type": "generic",
-                "file_path": file_path,
-                "size": stat.st_size,
-                "note": "通用文件，仅提供基本信息"
-            }
-            return file_data
-        except Exception as e:
-            raise Exception(f"无法加载文件: {e}")
+        stat = os.stat(file_path)
+        return {
+            "type": "generic",
+            "file_path": file_path,
+            "size": stat.st_size,
+            "note": "通用文件，仅提供基本信息"
+        }
     
     @classmethod
     def IS_CHANGED(cls, file, load_mode):
         """检查文件是否发生变化"""
+        if file == "请先上传文件":
+            return float("NaN")
+            
         input_dir = folder_paths.get_input_directory()
         file_path = os.path.join(input_dir, file)
         
         if not os.path.exists(file_path):
             return float("NaN")
         
-        # 使用文件修改时间和大小作为变化检测
         stat = os.stat(file_path)
         return f"{stat.st_mtime}_{stat.st_size}"
-    
-    @classmethod
-    def VALIDATE_INPUTS(cls, file, load_mode):
-        """验证输入参数"""
-        input_dir = folder_paths.get_input_directory()
-        file_path = os.path.join(input_dir, file)
-        
-        if not os.path.exists(file_path):
-            return f"文件不存在: {file}"
-        
-        return True
 
 # 节点注册
 NODE_CLASS_MAPPINGS = {
@@ -299,5 +261,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadFileWithButton": "Load File (Upload)"
+    "LoadFileWithButton": "Load File (Any Type)"
 }
