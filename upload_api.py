@@ -60,8 +60,46 @@ class FileUploadAPI:
                 
                 return web.json_response({'error': '未找到文件字段'}, status=400)
             else:
-                # 原有的JSON处理逻辑
-                # ... 保持不变 ...
+                # 处理JSON格式上传
+                try:
+                    data = await request.json()
+                    
+                    # 验证必要字段
+                    if 'filename' not in data or 'data' not in data:
+                        return web.json_response({'error': '缺少必要字段：filename或data'}, status=400)
+                    
+                    # 解码base64数据
+                    try:
+                        file_data = base64.b64decode(data['data'])
+                    except Exception as e:
+                        print(f"Base64解码错误: {str(e)}")
+                        return web.json_response({'error': f'Base64解码失败: {str(e)}'}, status=400)
+                    
+                    # 保存文件
+                    input_dir = folder_paths.get_input_directory()
+                    file_path = os.path.join(input_dir, data['filename'])
+                    
+                    # 如果文件已存在，添加数字后缀
+                    counter = 1
+                    original_path = file_path
+                    while os.path.exists(file_path):
+                        name, ext = os.path.splitext(original_path)
+                        file_path = f"{name}_{counter}{ext}"
+                        counter += 1
+                    
+                    # 写入文件
+                    with open(file_path, 'wb') as f:
+                        f.write(file_data)
+                    
+                    return web.json_response({
+                        'success': True,
+                        'filename': os.path.basename(file_path),
+                        'path': file_path,
+                        'size': len(file_data)
+                    })
+                except json.JSONDecodeError as e:
+                    print(f"JSON解析错误: {str(e)}")
+                    return web.json_response({'error': f'JSON解析失败: {str(e)}'}, status=400)
         
         except Exception as e:
             print(f"文件上传异常: {str(e)}")
